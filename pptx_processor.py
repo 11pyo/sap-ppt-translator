@@ -100,59 +100,38 @@ class PPTXProcessor:
             raise e
 
     def _update_paragraph_text(self, paragraph, translated_text):
+        """Update paragraph text while preserving ALL original formatting.
+        
+        Key insight: Instead of paragraph.text = ... (which destroys all runs/XML),
+        we modify individual run.text in-place so all XML attributes are preserved.
+        """
         if translated_text is None:
             return
         
         try:
-            # Capture properties from the runs before clearing
-            font_size = None
-            font_bold = None
-            font_italic = None
-            font_color_rgb = None
-            font_color_theme = None
+            runs = paragraph.runs
             
-            # Capture critical paragraph properties to prevent shifts
-            para_alignment = paragraph.alignment
-            para_level = paragraph.level
-            para_line_spacing = paragraph.line_spacing
-            para_space_before = paragraph.space_before
-            para_space_after = paragraph.space_after
-
-            for run in paragraph.runs:
-                f = run.font
-                if font_size is None and f.size: font_size = f.size
-                if font_bold is None and f.bold is not None: font_bold = f.bold
-                if font_italic is None and f.italic is not None: font_italic = f.italic
-                
-                try:
-                    if font_color_rgb is None and f.color.type == 1:
-                        font_color_rgb = f.color.rgb
-                    elif font_color_theme is None and f.color.type == 2:
-                        font_color_theme = f.color.theme_color
-                except: pass
-
-            paragraph.text = translated_text
+            if not runs:
+                # No runs exist — fallback to direct assignment (rare edge case)
+                paragraph.text = translated_text
+                return
             
-            # Apply paragraph properties back exactly
-            paragraph.alignment = para_alignment
-            paragraph.level = para_level
-            if para_line_spacing is not None: paragraph.line_spacing = para_line_spacing
-            if para_space_before is not None: paragraph.space_before = para_space_before
-            if para_space_after is not None: paragraph.space_after = para_space_after
+            if len(runs) == 1:
+                # Single run: simply replace its text (keeps ALL formatting)
+                runs[0].text = translated_text
+            else:
+                # Multiple runs: put all translated text in the first run,
+                # clear the remaining runs (preserves first run's formatting)
+                runs[0].text = translated_text
+                for run in runs[1:]:
+                    run.text = ""
             
-            # Apply run properties
-            if paragraph.runs:
-                run = paragraph.runs[0]
-                run.font.name = self.korean_font
-                if font_size: run.font.size = font_size
-                if font_bold is not None: run.font.bold = font_bold
-                if font_italic is not None: run.font.italic = font_italic
-                
-                if font_color_rgb is not None:
-                    run.font.color.rgb = font_color_rgb
-                elif font_color_theme is not None:
-                    run.font.color.theme_color = font_color_theme
+            # Only set Korean font name — do NOT touch size, color, bold, etc.
+            # They are already preserved from the original run XML
+            for run in runs:
+                if run.text:  # Only set font on runs that have text
+                    run.font.name = self.korean_font
+                    
         except Exception as e:
             print(f"Error updating paragraph text: {e}")
-            if translated_text is not None:
-                paragraph.text = translated_text
+            traceback.print_exc()
