@@ -108,5 +108,13 @@
   "Source-to-Pay": "Source-to-Pay",
   "Plan-to-Produce": "Plan-to-Produce",
   "Record-to-Report": "Record-to-Report",
-  "Hire-to-Retire": "Hire-to-Retire"
+  "Hire-to-Retire": "Hire-to-Retire",
+
+  "_comment_slide_marks": "슬라이드 워터마크/푸터 - 번역하지 않음",
+  "Public": "Public",
+  "Confidential": "Confidential",
+  "Internal": "Internal",
+  "Customer": "Customer",
+  "Draft": "Draft",
+  "Restricted": "Restricted"
 }

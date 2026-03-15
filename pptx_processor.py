@@ -1,5 +1,5 @@
 from pptx import Presentation
-from pptx.util import Pt
+from pptx.util import Pt, Emu
 import os
 import re
 import traceback
@@ -9,6 +9,7 @@ class PPTXProcessor:
         self.translator = translator
         self.korean_font = "Malgun Gothic"
         self.translation_level = translation_level
+        self.slide_height = None  # Set during process_presentation
 
     def _should_skip_shape(self, shape):
         """Determine if a shape's text should be excluded from translation."""
@@ -23,7 +24,6 @@ class PPTXProcessor:
                     return True
             except Exception:
                 pass
-            # Also check placeholder type enum if available
             try:
                 from pptx.enum.shapes import PP_PLACEHOLDER
                 ptype = shape.placeholder_format.type
@@ -47,7 +47,41 @@ class PPTXProcessor:
                     if run.font.size and run.font.size >= font_threshold:
                         return True
 
-        # 3. Short label detection (very short non-sentence text)
+        # 3. Footer/watermark detection - shape near bottom of slide with short text
+        if level in ("normal", "minimal") and shape.has_text_frame and self.slide_height:
+            try:
+                shape_top = shape.top
+                if shape_top is not None and self.slide_height > 0:
+                    # Shape is in the bottom 15% of the slide
+                    if shape_top > self.slide_height * 0.85:
+                        text = shape.text_frame.text.strip()
+                        if len(text) <= 30:
+                            return True
+            except Exception:
+                pass
+
+        # 4. Label-only shape detection - short text, no sentence structure, few paragraphs
+        #    Catches: diagram labels, process step names, small callout shapes
+        if level in ("normal", "minimal") and shape.has_text_frame:
+            tf = shape.text_frame
+            non_empty_paras = [p for p in tf.paragraphs if p.text.strip()]
+            total_text = tf.text.strip()
+
+            if non_empty_paras and len(non_empty_paras) <= 3:
+                words = total_text.split()
+                has_sentence_punct = bool(re.search(r'[.!?。]', total_text))
+
+                if level == "minimal":
+                    max_chars, max_words = 80, 10
+                else:  # normal
+                    max_chars, max_words = 60, 8
+
+                if (len(total_text) <= max_chars
+                        and len(words) <= max_words
+                        and not has_sentence_punct):
+                    return True
+
+        # 5. Short label detection (very short non-sentence text) - original rule
         if shape.has_text_frame:
             text = shape.text_frame.text.strip()
             max_len = 8 if level == "minimal" else 5
@@ -81,10 +115,46 @@ class PPTXProcessor:
 
         return False
 
+    def _is_heading_paragraph(self, paragraph, text_frame):
+        """Detect if a paragraph is a category heading at the top of a content text box.
+
+        Pattern: first paragraph is short (e.g., "Business Challenges"),
+        followed by multiple paragraphs of body/bullet content.
+        """
+        level = self.translation_level
+        if level == "thorough":
+            return False
+
+        text = paragraph.text.strip()
+        if not text:
+            return False
+
+        # Get all non-empty paragraphs in this text frame
+        all_paras = [p for p in text_frame.paragraphs if p.text.strip()]
+
+        # Must have at least 3 paragraphs total (heading + 2+ body items)
+        if len(all_paras) < 3:
+            return False
+
+        # Only applies to the FIRST non-empty paragraph
+        if all_paras[0] is not paragraph:
+            return False
+
+        # First paragraph must be short and not look like a sentence
+        if len(text) > 40:
+            return False
+        if re.search(r'[.!?。;]$', text):
+            return False
+
+        return True
+
     def process_presentation(self, input_path, output_path, progress_callback=None):
         try:
             from concurrent.futures import ThreadPoolExecutor
             prs = Presentation(input_path)
+
+            # Store slide height for footer/watermark detection
+            self.slide_height = prs.slide_height
 
             # Step 1: Collect all text targets
             text_frames = []
@@ -127,12 +197,15 @@ class PPTXProcessor:
                 for layout in master.slide_layouts:
                     collect_frames(layout.shapes, is_master=True)
 
-            # Step 2: Extract all unique paragraphs (with text-level filtering)
+            # Step 2: Extract all unique paragraphs (with text-level and heading filtering)
             unique_texts = set()
             paragraphs_to_translate = []
             for tf in text_frames:
                 for p in tf.paragraphs:
                     if p.text.strip() and len(p.text.strip()) > 1: # Skip single chars/bullets
+                        # Skip category headings (e.g., "Business Challenges" at top of text box)
+                        if self._is_heading_paragraph(p, tf):
+                            continue
                         if not self._should_skip_text(p.text):
                             unique_texts.add(p.text)
                             paragraphs_to_translate.append(p)
