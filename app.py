@@ -30,6 +30,19 @@ with st.sidebar:
     else:
         st.info("🔓 무료 엔진은 API 키가 필요하지 않습니다.")
 
+    st.divider()
+    translation_level = st.radio(
+        "번역 수준",
+        ["minimal", "normal", "thorough"],
+        index=1,
+        format_func=lambda x: {
+            "minimal": "🔹 최소 (제목/라벨/도형 유지, 본문만 번역)",
+            "normal": "🔸 표준 (권장 - 제목 유지, 본문 번역)",
+            "thorough": "🔻 전체 (대부분 번역, 제목만 유지)"
+        }[x],
+        help="SAP 프레젠테이션에는 '표준' 또는 '최소'를 권장합니다."
+    )
+
     st.info("💡 SAP 전문 용어(MRP, BDC 등)는 `glossary.json`의 정의를 따릅니다.")
 
 uploaded_file = st.file_uploader("PPTX 파일을 업로드하세요", type=["pptx"])
@@ -59,7 +72,7 @@ if uploaded_file is not None:
                     output_stream = io.BytesIO()
 
                     translator = TranslationService(service_type=service_type, api_key=api_key)
-                    processor = PPTXProcessor(translator)
+                    processor = PPTXProcessor(translator, translation_level=translation_level)
                     
                     progress_bar = st.progress(0)
                     
