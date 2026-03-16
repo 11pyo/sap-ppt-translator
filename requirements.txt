@@ -4,3 +4,5 @@ deepl
 openai
 python-dotenv
 deep-translator
+pymupdf
+python-docx

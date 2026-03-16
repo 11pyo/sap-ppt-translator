@@ -5,6 +5,7 @@ import io
 import base64
 from translator import TranslationService
 from pptx_processor import PPTXProcessor
+from pdf_processor import PDFProcessor
 
 
 def auto_download(data, filename, mime_type):
@@ -25,7 +26,7 @@ def auto_download(data, filename, mime_type):
         height=0,
     )
 
-st.set_page_config(page_title="SAP PPT Translator", page_icon="📊", layout="wide")
+st.set_page_config(page_title="SAP PPT/PDF Translator", page_icon="📊", layout="wide")
 
 col1, col2 = st.columns([0.1, 0.9])
 with col1:
@@ -34,7 +35,8 @@ with col2:
     st.title("SAP PPT 자동 번역 프로그램")
 
 st.markdown("""
-영문 SAP PPT 파일을 드래그 앤 드롭하면 서식을 유지한 채 한글로 번역해줍니다.
+영문 SAP PPT 또는 PDF 파일을 드래그 앤 드롭하면 서식을 유지한 채 한글로 번역해줍니다.
+`PPTX` → 번역된 `PPTX` | `PDF` → 번역된 `DOCX`
 """)
 
 with st.sidebar:
@@ -65,9 +67,13 @@ with st.sidebar:
 
     st.info("💡 SAP 전문 용어(MRP, BDC 등)는 `glossary.json`의 정의를 따릅니다.")
 
-uploaded_file = st.file_uploader("PPTX 파일을 업로드하세요", type=["pptx"])
+uploaded_file = st.file_uploader("PPTX 또는 PDF 파일을 업로드하세요", type=["pptx", "pdf"])
 
 if uploaded_file is not None:
+    # Determine file type
+    file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+    is_pdf = file_ext == ".pdf"
+
     # Validate API key only for non-free services
     is_key_required = service_type in ["DeepL", "OpenAI"]
     if is_key_required and not api_key:
@@ -76,44 +82,56 @@ if uploaded_file is not None:
         if st.button("번역 시작"):
             with st.status("번역 중...", expanded=True) as status:
                 try:
-                    import zipfile
                     file_bytes = uploaded_file.getvalue()
                     file_size = len(file_bytes)
-                    
+
                     # Log file info for debugging
                     st.write(f"📁 파일 크기: {file_size / 1024:.2f} KB")
-                    
-                    if not zipfile.is_zipfile(io.BytesIO(file_bytes)):
-                        st.error("⚠️ 업로드된 파일이 유효한 PPTX(Zip) 형식이 아닙니다. 혹시 구버전 PPT(97-2003) 파일인가요? .pptx 형식만 지원합니다.")
-                        st.stop()
+                    st.write(f"📄 파일 형식: {'PDF' if is_pdf else 'PPTX'}")
+
+                    if not is_pdf:
+                        import zipfile
+                        if not zipfile.is_zipfile(io.BytesIO(file_bytes)):
+                            st.error("⚠️ 업로드된 파일이 유효한 PPTX(Zip) 형식이 아닙니다. 혹시 구버전 PPT(97-2003) 파일인가요? .pptx 형식만 지원합니다.")
+                            st.stop()
 
                     # Use BytesIO
                     input_stream = io.BytesIO(file_bytes)
                     output_stream = io.BytesIO()
 
                     translator = TranslationService(service_type=service_type, api_key=api_key)
-                    processor = PPTXProcessor(translator, translation_level=translation_level)
-                    
+
                     progress_bar = st.progress(0)
-                    
+
                     def update_progress(progress):
                         progress_bar.progress(progress)
 
                     # Ensure pointer is at start
                     input_stream.seek(0)
-                    
-                    output_path_result, errors = processor.process_presentation(input_stream, output_stream, progress_callback=update_progress)
-                    
+
+                    if is_pdf:
+                        # PDF → DOCX
+                        processor = PDFProcessor(translator, translation_level=translation_level)
+                        output_result, errors = processor.process_pdf(input_stream, output_stream, progress_callback=update_progress)
+                        output_filename = os.path.splitext(uploaded_file.name)[0] + "_KO.docx"
+                        output_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    else:
+                        # PPTX → PPTX
+                        processor = PPTXProcessor(translator, translation_level=translation_level)
+                        output_result, errors = processor.process_presentation(input_stream, output_stream, progress_callback=update_progress)
+                        output_filename = os.path.splitext(uploaded_file.name)[0] + "_KO.pptx"
+                        output_mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
                     # Get results from output stream
                     output_data = output_stream.getvalue()
                     if not output_data:
                         st.error("⚠️ 번역 결과 파일이 비어 있습니다. 처리 중 오류가 발생했을 수 있습니다.")
                         st.stop()
 
-                    output_filename = os.path.splitext(uploaded_file.name)[0] + "_KO.pptx"
-                    
                     status.update(label="번역 완료!", state="complete", expanded=False)
                     st.success(f"✅ 번역이 완료되었습니다. (파일 크기: {len(output_data)/1024/1024:.2f} MB)")
+                    if is_pdf:
+                        st.info("📝 PDF는 텍스트를 추출하여 DOCX(Word) 파일로 변환됩니다.")
 
                     if errors:
                         with st.expander("📝 번역 시 발생한 일부 오류 (디버깅용)", expanded=False):
@@ -121,18 +139,14 @@ if uploaded_file is not None:
                                 st.write(f"- {err}")
 
                     # Auto-download the translated file
-                    auto_download(
-                        output_data,
-                        output_filename,
-                        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                    )
+                    auto_download(output_data, output_filename, output_mime)
 
                     # Also show manual download button as fallback
                     st.download_button(
                         label="📥 다운로드가 안 됐다면 여기를 클릭",
                         data=output_data,
                         file_name=output_filename,
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        mime=output_mime
                     )
                 except Exception as e:
                     st.error(f"번역 중 오류 발생: {str(e)}")
