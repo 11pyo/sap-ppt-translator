@@ -54,7 +54,7 @@ with col2:
 
 st.markdown("""
 영문 SAP PPT 또는 PDF 파일을 드래그 앤 드롭하면 서식을 유지한 채 한글로 번역해줍니다.
-`PPTX` → 번역된 `PPTX` | `PDF` → 번역된 `DOCX`
+`PPTX` → 번역된 `PPTX` | `PDF` → 번역된 `PPTX`
 """)
 
 with st.sidebar:
@@ -128,11 +128,28 @@ if uploaded_file is not None:
                     input_stream.seek(0)
 
                     if is_pdf:
-                        # PDF → DOCX
-                        processor = PDFProcessor(translator, translation_level=translation_level)
-                        output_result, errors = processor.process_pdf(input_stream, output_stream, progress_callback=update_progress)
-                        output_filename = os.path.splitext(uploaded_file.name)[0] + "_KO.docx"
-                        output_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        # PDF → PPTX conversion → PPTXProcessor translation → PPTX output
+                        st.write("📄 PDF → PPTX 변환 중...")
+                        pdf_processor = PDFProcessor()
+                        intermediate_pptx = io.BytesIO()
+
+                        def pdf_progress(p):
+                            progress_bar.progress(min(p * 0.3, 0.3))
+
+                        pdf_processor.convert_to_pptx(input_stream, intermediate_pptx, progress_callback=pdf_progress)
+
+                        st.write("🔄 PPTX 번역 중...")
+                        intermediate_pptx.seek(0)
+
+                        def translate_progress(p):
+                            progress_bar.progress(0.3 + p * 0.7)
+
+                        processor = PPTXProcessor(translator, translation_level=translation_level)
+                        output_result, errors = processor.process_presentation(
+                            intermediate_pptx, output_stream, progress_callback=translate_progress
+                        )
+                        output_filename = os.path.splitext(uploaded_file.name)[0] + "_KO.pptx"
+                        output_mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                     else:
                         # PPTX → PPTX
                         processor = PPTXProcessor(translator, translation_level=translation_level)
@@ -149,7 +166,7 @@ if uploaded_file is not None:
                     status.update(label="번역 완료!", state="complete", expanded=False)
                     st.success(f"✅ 번역이 완료되었습니다. (파일 크기: {len(output_data)/1024/1024:.2f} MB)")
                     if is_pdf:
-                        st.info("📝 PDF는 텍스트를 추출하여 DOCX(Word) 파일로 변환됩니다.")
+                        st.info("📝 PDF를 PPTX로 변환 후 번역했습니다. 원본 레이아웃이 배경 이미지로 유지됩니다.")
 
                     if errors:
                         with st.expander("📝 번역 시 발생한 일부 오류 (디버깅용)", expanded=False):

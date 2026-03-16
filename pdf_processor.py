@@ -1,22 +1,26 @@
 import fitz  # PyMuPDF
-from docx import Document
-from docx.shared import Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from pptx import Presentation
+from pptx.util import Pt, Emu
+from pptx.dml.color import RGBColor
+import io
 import re
 import traceback
 
 
 class PDFProcessor:
-    def __init__(self, translator, translation_level="normal"):
-        self.translator = translator
-        self.translation_level = translation_level
+    """Convert PDF to PPTX with page images as backgrounds and text boxes overlaid.
+
+    The resulting PPTX can then be translated by the existing PPTXProcessor.
+    """
+
+    # PDF points to EMU conversion (1 pt = 12700 EMU)
+    PT_TO_EMU = 12700
+
+    def __init__(self):
+        pass
 
     def _extract_line_text_with_spacing(self, line):
-        """Extract text from a line's spans with proper spacing.
-
-        PDF spans often lack spaces between them. Use position gaps to detect
-        where spaces should be inserted.
-        """
+        """Extract text from a line's spans with proper spacing."""
         spans = line.get("spans", [])
         if not spans:
             return "", 0, False
@@ -38,9 +42,7 @@ class PDFProcessor:
                     parts.append(" ")
 
             parts.append(text)
-            prev_end_x = span.get("bbox", [0, 0, 0, 0])[2] if "bbox" in span else (
-                span["origin"][0] + len(text) * span["size"] * 0.5
-            )
+            prev_end_x = span.get("bbox", [0, 0, 0, 0])[2]
 
             if span["size"] > max_size:
                 max_size = span["size"]
@@ -49,269 +51,223 @@ class PDFProcessor:
 
         return "".join(parts), max_size, is_bold
 
-    def _extract_block_text(self, block):
-        """Extract full block text by joining lines with spaces.
-        Returns (text, max_font_size, is_bold, bbox).
-        """
-        block_lines = []
-        max_size = 0
-        is_bold = False
-
-        for line in block.get("lines", []):
-            line_text, line_size, line_bold = self._extract_line_text_with_spacing(line)
-            line_text = line_text.strip()
-            if not line_text:
-                continue
-            block_lines.append(line_text)
-            if line_size > max_size:
-                max_size = line_size
-            if line_bold:
-                is_bold = True
-
-        full_text = " ".join(block_lines)
-        return full_text, max_size, is_bold, block["bbox"]
-
     def _is_footer_or_header(self, text, y_top, y_bottom, page_height):
-        """Detect footer/header/copyright text that should be skipped entirely."""
+        """Detect footer/header/copyright text."""
         stripped = text.strip()
 
-        # Page number prefix pattern: "3INTERNAL", "12INTERNAL", "3 INTERNAL"
         if re.match(r'^\d+\s*INTERNAL', stripped, re.IGNORECASE):
             return True
-
-        # "INTERNAL – SAP" patterns
         if re.search(r'INTERNAL\s*[–\-]\s*SAP', stripped, re.IGNORECASE):
             return True
-
-        # Standalone "INTERNAL" at bottom of page
         if y_bottom > page_height * 0.90 and re.search(r'INTERNAL', stripped, re.IGNORECASE):
             return True
-
-        # Copyright notices
         if '© SAP' in stripped or 'All rights reserved' in stripped:
             return True
-
-        # Bottom 10% of page with very short text (page numbers, marks)
         if y_bottom > page_height * 0.90 and len(stripped) <= 30:
             return True
 
         return False
 
-    def _should_skip_text(self, text):
-        """Check if a specific text string should skip translation."""
-        stripped = text.strip()
-        if not stripped:
-            return True
+    def _sample_bg_color(self, pixmap, bbox, zoom):
+        """Sample the dominant background color around a text area from the rendered pixmap."""
+        # Convert PDF coords to pixel coords
+        x0 = int(bbox[0] * zoom)
+        y0 = int(bbox[1] * zoom)
+        x1 = int(bbox[2] * zoom)
+        y1 = int(bbox[3] * zoom)
 
-        # Already Korean
-        if any('\uac00' <= c <= '\ud7a3' for c in stripped):
-            return True
+        # Clamp to pixmap bounds
+        x0 = max(0, min(x0, pixmap.width - 1))
+        y0 = max(0, min(y0, pixmap.height - 1))
+        x1 = max(0, min(x1, pixmap.width - 1))
+        y1 = max(0, min(y1, pixmap.height - 1))
 
-        # Pure numbers, dates, or version strings
-        if re.match(r'^[\d\.\-/\s:,]+$', stripped):
-            return True
+        # Sample a few pixels around the edges of the text area
+        sample_points = []
+        # Left edge, middle height
+        mid_y = (y0 + y1) // 2
+        if x0 > 2:
+            sample_points.append((x0 - 2, mid_y))
+        # Above the text
+        if y0 > 2:
+            mid_x = (x0 + x1) // 2
+            sample_points.append((mid_x, y0 - 2))
+        # Right edge
+        if x1 < pixmap.width - 2:
+            sample_points.append((x1 + 1, mid_y))
 
-        # All-caps short acronyms (2-6 chars, allowing /)
-        if re.match(r'^[A-Z/]{2,6}$', stripped):
-            return True
+        if not sample_points:
+            return RGBColor(255, 255, 255)
 
-        # Fiori app IDs
-        if re.match(r'^F\d{4,5}$', stripped):
-            return True
+        # Average the sampled colors
+        r_total, g_total, b_total = 0, 0, 0
+        valid = 0
+        for px, py in sample_points:
+            try:
+                pixel = pixmap.pixel(px, py)
+                r_total += pixel[0]
+                g_total += pixel[1]
+                b_total += pixel[2]
+                valid += 1
+            except Exception:
+                continue
 
-        # Single characters or just punctuation
-        if len(stripped) <= 2 and not stripped.isalpha():
-            return True
+        if valid == 0:
+            return RGBColor(255, 255, 255)
 
-        # Check against do-not-translate glossary entries (exact match)
-        if hasattr(self.translator, '_do_not_translate'):
-            if stripped.lower() in self.translator._do_not_translate:
-                return True
+        return RGBColor(r_total // valid, g_total // valid, b_total // valid)
 
-        return False
+    def _get_font_color(self, line):
+        """Extract the dominant font color from a line's spans."""
+        for span in line.get("spans", []):
+            color = span.get("color", 0)
+            if isinstance(color, int):
+                r = (color >> 16) & 0xFF
+                g = (color >> 8) & 0xFF
+                b = color & 0xFF
+                return RGBColor(r, g, b)
+        return None  # Use default
 
-    def _should_skip_as_label(self, text, font_size):
-        """For 'normal' level: skip very short label-like text with large font (section titles)."""
-        if self.translation_level == "thorough":
-            return False
+    def convert_to_pptx(self, input_stream, output_stream, progress_callback=None):
+        """Convert PDF to PPTX: each page becomes a slide with image background + text boxes.
 
-        stripped = text.strip()
-        words = stripped.split()
-
-        # Very short text with very large font (≥ 22pt) = likely a major section title
-        if font_size >= 22 and len(words) <= 5:
-            return True
-
-        return False
-
-    def process_pdf(self, input_stream, output_stream, progress_callback=None):
-        """Extract text from PDF, translate, and generate DOCX output."""
+        Returns (output_stream, info_messages).
+        """
         try:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            pdf_doc = fitz.open(stream=input_stream.read(), filetype="pdf")
+            total_pages = len(pdf_doc)
 
-            doc = fitz.open(stream=input_stream.read(), filetype="pdf")
-            total_pages = len(doc)
+            # Get PDF page dimensions (use first page as reference)
+            first_page = pdf_doc[0]
+            pdf_width = first_page.rect.width   # in PDF points (1/72 inch)
+            pdf_height = first_page.rect.height
 
-            # Step 1: Extract all text blocks from all pages
-            all_pages_data = []  # list of (page_num, items_list)
+            # Create presentation with matching slide dimensions
+            prs = Presentation()
+            slide_width_emu = int(pdf_width * self.PT_TO_EMU)
+            slide_height_emu = int(pdf_height * self.PT_TO_EMU)
+            prs.slide_width = slide_width_emu
+            prs.slide_height = slide_height_emu
+
+            # Use blank layout
+            blank_layout = prs.slide_layouts[6]  # Blank layout
+
+            info_messages = []
+            text_block_count = 0
+
+            # Rendering zoom (1.5x for balance between quality and file size)
+            zoom = 1.5
 
             for page_num in range(total_pages):
-                page = doc[page_num]
+                page = pdf_doc[page_num]
                 page_height = page.rect.height
 
+                # Create slide
+                slide = prs.slides.add_slide(blank_layout)
+
+                # Step 1: Render page as image
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+
+                # Use JPEG for smaller file size (quality 85)
+                img_bytes = pix.tobytes("jpeg")
+
+                # Add image as full-slide background shape
+                img_stream = io.BytesIO(img_bytes)
+                bg_pic = slide.shapes.add_picture(
+                    img_stream, 0, 0, slide_width_emu, slide_height_emu
+                )
+                # Send background image to back
+                sp = bg_pic._element
+                sp.getparent().remove(sp)
+                slide.shapes._spTree.insert(2, sp)
+
+                # Step 2: Extract text blocks and create text boxes
                 text_dict = page.get_text("dict")
-                page_items = []
 
                 for block in text_dict.get("blocks", []):
                     if block["type"] != 0:  # Skip image blocks
                         continue
 
-                    text, font_size, is_bold, bbox = self._extract_block_text(block)
-                    text = text.strip()
-                    if not text:
-                        continue
+                    for line in block.get("lines", []):
+                        line_text, font_size, is_bold = self._extract_line_text_with_spacing(line)
+                        line_text = line_text.strip()
+                        if not line_text:
+                            continue
 
-                    y_top = bbox[1]
-                    y_bottom = bbox[3]
+                        line_bbox = line.get("bbox", block["bbox"])
+                        y_top = line_bbox[1]
+                        y_bottom = line_bbox[3]
 
-                    # Skip footer/header/copyright
-                    if self._is_footer_or_header(text, y_top, y_bottom, page_height):
-                        continue
+                        # Skip footer/header
+                        if self._is_footer_or_header(line_text, y_top, y_bottom, page_height):
+                            continue
 
-                    # Skip non-translatable text
-                    if self._should_skip_text(text):
-                        page_items.append({
-                            "text": text,
-                            "size": font_size,
-                            "bold": is_bold,
-                            "skip": True,
-                            "y": y_top
-                        })
-                        continue
+                        # Convert PDF coordinates to EMU
+                        left = int(line_bbox[0] * self.PT_TO_EMU)
+                        top = int(line_bbox[1] * self.PT_TO_EMU)
+                        width = int((line_bbox[2] - line_bbox[0]) * self.PT_TO_EMU)
+                        height = int((line_bbox[3] - line_bbox[1]) * self.PT_TO_EMU)
 
-                    # Check label skip
-                    if self._should_skip_as_label(text, font_size):
-                        page_items.append({
-                            "text": text,
-                            "size": font_size,
-                            "bold": is_bold,
-                            "skip": True,
-                            "y": y_top
-                        })
-                        continue
+                        # Add padding to cover original text
+                        pad_h = int(font_size * 0.2 * self.PT_TO_EMU)
+                        pad_v = int(font_size * 0.15 * self.PT_TO_EMU)
+                        left = max(0, left - pad_h)
+                        top = max(0, top - pad_v)
+                        width = min(width + pad_h * 3, slide_width_emu - left)
+                        height = min(height + pad_v * 2, slide_height_emu - top)
 
-                    # Translate this text
-                    page_items.append({
-                        "text": text,
-                        "size": font_size,
-                        "bold": is_bold,
-                        "skip": False,
-                        "y": y_top
-                    })
+                        # Ensure minimum size
+                        if width < 50000 or height < 30000:
+                            continue
 
-                # Sort items by vertical position
-                page_items.sort(key=lambda x: x["y"])
-                all_pages_data.append((page_num, page_items))
+                        # Sample background color from rendered image
+                        bg_color = self._sample_bg_color(pix, line_bbox, zoom)
 
-            # Step 2: Collect unique texts to translate
-            unique_texts = set()
-            for page_num, items in all_pages_data:
-                for item in items:
-                    if not item["skip"]:
-                        unique_texts.add(item["text"])
+                        # Get font color from PDF
+                        font_color = self._get_font_color(line)
 
-            # Step 3: Translate unique texts in parallel
-            total_unique = len(unique_texts)
-            translation_map = {}
-            translation_errors = []
-            processed_count = 0
+                        # Create text box
+                        txBox = slide.shapes.add_textbox(left, top, width, height)
+                        tf = txBox.text_frame
+                        tf.word_wrap = False
 
-            if unique_texts:
-                max_workers = 15
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_text = {
-                        executor.submit(self.translator.translate, text): text
-                        for text in unique_texts
-                    }
+                        # Minimal margins
+                        tf.margin_left = Emu(0)
+                        tf.margin_right = Emu(0)
+                        tf.margin_top = Emu(0)
+                        tf.margin_bottom = Emu(0)
 
-                    for future in as_completed(future_to_text):
-                        text = future_to_text[future]
-                        try:
-                            result = future.result()
-                            translation_map[text] = result if result else text
-                        except Exception as e:
-                            err_msg = f"'{text[:30]}...' 번역 실패: {str(e)}"
-                            translation_errors.append(err_msg)
-                            translation_map[text] = text
+                        # Set text
+                        p = tf.paragraphs[0]
+                        p.space_before = Pt(0)
+                        p.space_after = Pt(0)
+                        run = p.add_run()
+                        run.text = line_text
 
-                        processed_count += 1
-                        if progress_callback:
-                            progress_callback(min((processed_count / total_unique) * 0.8, 0.8))
+                        # Match font attributes from PDF
+                        run.font.size = Pt(font_size)
+                        if is_bold:
+                            run.font.bold = True
+                        if font_color:
+                            run.font.color.rgb = font_color
 
-            # Step 4: Generate DOCX output
-            docx_doc = Document()
+                        # Set fill to match surrounding background
+                        txBox.fill.solid()
+                        txBox.fill.fore_color.rgb = bg_color
 
-            # Set default font
-            style = docx_doc.styles['Normal']
-            font = style.font
-            font.name = 'Malgun Gothic'
-            font.size = Pt(10)
+                        text_block_count += 1
 
-            # Reduce paragraph spacing
-            style.paragraph_format.space_before = Pt(1)
-            style.paragraph_format.space_after = Pt(1)
-
-            pages_written = 0
-            for page_idx, (page_num, items) in enumerate(all_pages_data):
-                # Skip pages with no content
-                if not items:
-                    continue
-
-                # Add page separator (except for first page with content)
-                if pages_written > 0:
-                    docx_doc.add_page_break()
-
-                # Add page header
-                header_para = docx_doc.add_paragraph()
-                header_run = header_para.add_run(f"── 페이지 {page_num + 1} / {total_pages} ──")
-                header_run.font.size = Pt(8)
-                header_run.font.color.rgb = RGBColor(150, 150, 150)
-                header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-                for item in items:
-                    original_text = item["text"]
-                    para = docx_doc.add_paragraph()
-
-                    if item["skip"]:
-                        # Skipped text: keep original English, gray color
-                        run = para.add_run(original_text)
-                        run.font.color.rgb = RGBColor(100, 100, 100)
-                        if item.get("bold"):
-                            run.bold = True
-                        if item.get("size", 0) >= 16:
-                            run.font.size = Pt(min(int(item["size"] * 0.75), 20))
-                    else:
-                        # Translated text
-                        translated = translation_map.get(original_text, original_text)
-                        run = para.add_run(translated)
-                        run.font.name = 'Malgun Gothic'
-                        if item.get("bold"):
-                            run.bold = True
-                        if item.get("size", 0) >= 14:
-                            run.font.size = Pt(min(int(item["size"] * 0.7), 18))
-
-                pages_written += 1
                 if progress_callback:
-                    progress_callback(0.8 + (page_idx / max(len(all_pages_data), 1)) * 0.2)
+                    progress_callback(min((page_num + 1) / total_pages, 1.0))
 
-            if progress_callback:
-                progress_callback(1.0)
+            info_messages.append(f"총 {total_pages}페이지, {text_block_count}개 텍스트 블록 변환됨")
 
-            docx_doc.save(output_stream)
-            doc.close()
-            return output_stream, translation_errors
+            prs.save(output_stream)
+            pdf_doc.close()
+            return output_stream, info_messages
 
         except Exception as e:
-            print(f"Critical error in process_pdf: {e}")
+            print(f"Critical error in convert_to_pptx: {e}")
             traceback.print_exc()
             raise e
