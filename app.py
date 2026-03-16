@@ -9,18 +9,36 @@ from pdf_processor import PDFProcessor
 
 
 def auto_download(data, filename, mime_type):
-    """Trigger automatic file download using JavaScript."""
+    """Trigger automatic file download using JavaScript with Blob for large files."""
     b64 = base64.b64encode(data).decode()
-    href = f'data:{mime_type};base64,{b64}'
+    # Use Blob approach to handle large files reliably
     components.html(
         f'''
         <script>
-            const link = document.createElement('a');
-            link.href = "{href}";
+            // Decode base64 to binary
+            const b64 = "{b64}";
+            const byteChars = atob(b64);
+            const byteArrays = [];
+            const sliceSize = 512;
+            for (let offset = 0; offset < byteChars.length; offset += sliceSize) {{
+                const slice = byteChars.slice(offset, offset + sliceSize);
+                const byteNumbers = new Array(slice.length);
+                for (let i = 0; i < slice.length; i++) {{
+                    byteNumbers[i] = slice.charCodeAt(i);
+                }}
+                byteArrays.push(new Uint8Array(byteNumbers));
+            }}
+            const blob = new Blob(byteArrays, {{type: "{mime_type}"}});
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
             link.download = "{filename}";
             document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+            setTimeout(() => {{
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+            }}, 100);
         </script>
         ''',
         height=0,

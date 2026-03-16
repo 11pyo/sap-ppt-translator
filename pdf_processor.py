@@ -11,6 +11,92 @@ class PDFProcessor:
         self.translator = translator
         self.translation_level = translation_level
 
+    def _extract_line_text_with_spacing(self, line):
+        """Extract text from a line's spans with proper spacing.
+
+        PDF spans often lack spaces between them. Use position gaps to detect
+        where spaces should be inserted.
+        """
+        spans = line.get("spans", [])
+        if not spans:
+            return "", 0, False
+
+        parts = []
+        prev_end_x = None
+        max_size = 0
+        is_bold = False
+
+        for span in spans:
+            text = span["text"]
+            if not text:
+                continue
+
+            if prev_end_x is not None:
+                gap = span["origin"][0] - prev_end_x
+                char_width = span["size"] * 0.5
+                if gap > char_width * 0.3:
+                    parts.append(" ")
+
+            parts.append(text)
+            prev_end_x = span.get("bbox", [0, 0, 0, 0])[2] if "bbox" in span else (
+                span["origin"][0] + len(text) * span["size"] * 0.5
+            )
+
+            if span["size"] > max_size:
+                max_size = span["size"]
+            if "bold" in span.get("font", "").lower():
+                is_bold = True
+
+        return "".join(parts), max_size, is_bold
+
+    def _extract_block_text(self, block):
+        """Extract full block text by joining lines with spaces.
+        Returns (text, max_font_size, is_bold, bbox).
+        """
+        block_lines = []
+        max_size = 0
+        is_bold = False
+
+        for line in block.get("lines", []):
+            line_text, line_size, line_bold = self._extract_line_text_with_spacing(line)
+            line_text = line_text.strip()
+            if not line_text:
+                continue
+            block_lines.append(line_text)
+            if line_size > max_size:
+                max_size = line_size
+            if line_bold:
+                is_bold = True
+
+        full_text = " ".join(block_lines)
+        return full_text, max_size, is_bold, block["bbox"]
+
+    def _is_footer_or_header(self, text, y_top, y_bottom, page_height):
+        """Detect footer/header/copyright text that should be skipped entirely."""
+        stripped = text.strip()
+
+        # Page number prefix pattern: "3INTERNAL", "12INTERNAL", "3 INTERNAL"
+        if re.match(r'^\d+\s*INTERNAL', stripped, re.IGNORECASE):
+            return True
+
+        # "INTERNAL – SAP" patterns
+        if re.search(r'INTERNAL\s*[–\-]\s*SAP', stripped, re.IGNORECASE):
+            return True
+
+        # Standalone "INTERNAL" at bottom of page
+        if y_bottom > page_height * 0.90 and re.search(r'INTERNAL', stripped, re.IGNORECASE):
+            return True
+
+        # Copyright notices
+        if '© SAP' in stripped or 'All rights reserved' in stripped:
+            return True
+
+        # Bottom 10% of page with very short text (page numbers, marks)
+        if y_bottom > page_height * 0.90 and len(stripped) <= 30:
+            return True
+
+        return False
+
     def _should_skip_text(self, text):
         """Check if a specific text string should skip translation."""
         stripped = text.strip()
@@ -29,122 +115,110 @@ class PDFProcessor:
         if re.match(r'^[A-Z/]{2,6}$', stripped):
             return True
 
-        # Fiori app IDs (e.g., "F1234", "F0842")
+        # Fiori app IDs
         if re.match(r'^F\d{4,5}$', stripped):
             return True
 
-        # Check against do-not-translate glossary entries
+        # Single characters or just punctuation
+        if len(stripped) <= 2 and not stripped.isalpha():
+            return True
+
+        # Check against do-not-translate glossary entries (exact match)
         if hasattr(self.translator, '_do_not_translate'):
             if stripped.lower() in self.translator._do_not_translate:
                 return True
 
         return False
 
-    def _is_heading(self, block, page_height):
-        """Determine if a text block is likely a heading/title."""
+    def _should_skip_as_label(self, text, font_size):
+        """For 'normal' level: skip very short label-like text with large font (section titles)."""
         if self.translation_level == "thorough":
             return False
 
-        text = block["text"].strip()
-        if not text:
-            return False
+        stripped = text.strip()
+        words = stripped.split()
 
-        # Short text (≤ 40 chars) at the top 15% of the page
-        y_position = block["bbox"][1]  # top y coordinate
-        if y_position < page_height * 0.15 and len(text) <= 60:
+        # Very short text with very large font (≥ 22pt) = likely a major section title
+        if font_size >= 22 and len(words) <= 5:
             return True
 
-        # Large font size (likely a title/heading)
-        if block.get("size", 0) >= 18 and len(text) <= 80:
-            return True
-
-        # Short label-like text (≤ 4 words, no sentence punctuation)
-        words = text.split()
-        if (len(words) <= 4 and len(text) <= 40
-                and not re.search(r'[.!?。,]', text)):
-            return True
-
-        return False
-
-    def _is_footer(self, block, page_height):
-        """Detect footer/watermark text."""
-        y_position = block["bbox"][3]  # bottom y coordinate
-        text = block["text"].strip()
-
-        if y_position > page_height * 0.9 and len(text) <= 30:
-            return True
         return False
 
     def process_pdf(self, input_stream, output_stream, progress_callback=None):
         """Extract text from PDF, translate, and generate DOCX output."""
         try:
-            from concurrent.futures import ThreadPoolExecutor
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
             doc = fitz.open(stream=input_stream.read(), filetype="pdf")
             total_pages = len(doc)
 
             # Step 1: Extract all text blocks from all pages
-            all_blocks = []  # list of (page_num, block_info_list)
+            all_pages_data = []  # list of (page_num, items_list)
+
             for page_num in range(total_pages):
                 page = doc[page_num]
                 page_height = page.rect.height
 
-                # Extract text as dict for detailed info (position, font size, etc.)
                 text_dict = page.get_text("dict")
-                page_blocks = []
+                page_items = []
 
                 for block in text_dict.get("blocks", []):
                     if block["type"] != 0:  # Skip image blocks
                         continue
 
-                    # Combine all spans in all lines of this block
-                    block_text = ""
-                    max_size = 0
-                    is_bold = False
-                    for line in block.get("lines", []):
-                        line_text = ""
-                        for span in line.get("spans", []):
-                            line_text += span["text"]
-                            if span["size"] > max_size:
-                                max_size = span["size"]
-                            if "bold" in span.get("font", "").lower():
-                                is_bold = True
-                        if line_text.strip():
-                            if block_text:
-                                block_text += " "
-                            block_text += line_text
-
-                    if not block_text.strip():
+                    text, font_size, is_bold, bbox = self._extract_block_text(block)
+                    text = text.strip()
+                    if not text:
                         continue
 
-                    block_info = {
-                        "text": block_text.strip(),
-                        "bbox": block["bbox"],
-                        "size": max_size,
+                    y_top = bbox[1]
+                    y_bottom = bbox[3]
+
+                    # Skip footer/header/copyright
+                    if self._is_footer_or_header(text, y_top, y_bottom, page_height):
+                        continue
+
+                    # Skip non-translatable text
+                    if self._should_skip_text(text):
+                        page_items.append({
+                            "text": text,
+                            "size": font_size,
+                            "bold": is_bold,
+                            "skip": True,
+                            "y": y_top
+                        })
+                        continue
+
+                    # Check label skip
+                    if self._should_skip_as_label(text, font_size):
+                        page_items.append({
+                            "text": text,
+                            "size": font_size,
+                            "bold": is_bold,
+                            "skip": True,
+                            "y": y_top
+                        })
+                        continue
+
+                    # Translate this text
+                    page_items.append({
+                        "text": text,
+                        "size": font_size,
                         "bold": is_bold,
-                        "page": page_num
-                    }
+                        "skip": False,
+                        "y": y_top
+                    })
 
-                    # Apply filtering
-                    if self._is_footer(block_info, page_height):
-                        block_info["skip"] = True
-                    elif self._is_heading(block_info, page_height):
-                        block_info["skip"] = True
-                    elif self._should_skip_text(block_info["text"]):
-                        block_info["skip"] = True
-                    else:
-                        block_info["skip"] = False
-
-                    page_blocks.append(block_info)
-
-                all_blocks.append((page_num, page_blocks))
+                # Sort items by vertical position
+                page_items.sort(key=lambda x: x["y"])
+                all_pages_data.append((page_num, page_items))
 
             # Step 2: Collect unique texts to translate
             unique_texts = set()
-            for page_num, blocks in all_blocks:
-                for b in blocks:
-                    if not b["skip"]:
-                        unique_texts.add(b["text"])
+            for page_num, items in all_pages_data:
+                for item in items:
+                    if not item["skip"]:
+                        unique_texts.add(item["text"])
 
             # Step 3: Translate unique texts in parallel
             total_unique = len(unique_texts)
@@ -160,7 +234,7 @@ class PDFProcessor:
                         for text in unique_texts
                     }
 
-                    for future in future_to_text:
+                    for future in as_completed(future_to_text):
                         text = future_to_text[future]
                         try:
                             result = future.result()
@@ -172,7 +246,7 @@ class PDFProcessor:
 
                         processed_count += 1
                         if progress_callback:
-                            progress_callback((processed_count / total_unique) * 0.8)
+                            progress_callback(min((processed_count / total_unique) * 0.8, 0.8))
 
             # Step 4: Generate DOCX output
             docx_doc = Document()
@@ -183,41 +257,55 @@ class PDFProcessor:
             font.name = 'Malgun Gothic'
             font.size = Pt(10)
 
-            for page_idx, (page_num, blocks) in enumerate(all_blocks):
-                # Add page separator (except for first page)
-                if page_idx > 0:
+            # Reduce paragraph spacing
+            style.paragraph_format.space_before = Pt(1)
+            style.paragraph_format.space_after = Pt(1)
+
+            pages_written = 0
+            for page_idx, (page_num, items) in enumerate(all_pages_data):
+                # Skip pages with no content
+                if not items:
+                    continue
+
+                # Add page separator (except for first page with content)
+                if pages_written > 0:
                     docx_doc.add_page_break()
 
                 # Add page header
                 header_para = docx_doc.add_paragraph()
-                header_run = header_para.add_run(f"── 페이지 {page_num + 1} ──")
+                header_run = header_para.add_run(f"── 페이지 {page_num + 1} / {total_pages} ──")
                 header_run.font.size = Pt(8)
                 header_run.font.color.rgb = RGBColor(150, 150, 150)
                 header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-                for b in blocks:
-                    original_text = b["text"]
+                for item in items:
+                    original_text = item["text"]
+                    para = docx_doc.add_paragraph()
 
-                    if b["skip"]:
-                        # Skipped text: keep original English
-                        para = docx_doc.add_paragraph()
+                    if item["skip"]:
+                        # Skipped text: keep original English, gray color
                         run = para.add_run(original_text)
                         run.font.color.rgb = RGBColor(100, 100, 100)
-                        if b.get("bold"):
+                        if item.get("bold"):
                             run.bold = True
-                        if b.get("size", 0) >= 16:
-                            run.font.size = Pt(min(int(b["size"] * 0.8), 24))
+                        if item.get("size", 0) >= 16:
+                            run.font.size = Pt(min(int(item["size"] * 0.75), 20))
                     else:
                         # Translated text
                         translated = translation_map.get(original_text, original_text)
-                        para = docx_doc.add_paragraph()
                         run = para.add_run(translated)
                         run.font.name = 'Malgun Gothic'
-                        if b.get("bold"):
+                        if item.get("bold"):
                             run.bold = True
+                        if item.get("size", 0) >= 14:
+                            run.font.size = Pt(min(int(item["size"] * 0.7), 18))
 
+                pages_written += 1
                 if progress_callback:
-                    progress_callback(0.8 + (page_idx / len(all_blocks)) * 0.2)
+                    progress_callback(0.8 + (page_idx / max(len(all_pages_data), 1)) * 0.2)
+
+            if progress_callback:
+                progress_callback(1.0)
 
             docx_doc.save(output_stream)
             doc.close()
