@@ -113,6 +113,10 @@ class PPTXProcessor:
         if re.match(r'^[A-Z/]{2,6}$', stripped):
             return True
 
+        # Fiori app IDs (e.g., "F1234", "F0842")
+        if re.match(r'^F\d{4,5}$', stripped):
+            return True
+
         # Check against do-not-translate glossary entries
         if hasattr(self.translator, '_do_not_translate'):
             if stripped.lower() in self.translator._do_not_translate:

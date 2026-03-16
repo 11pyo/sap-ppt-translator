@@ -147,6 +147,7 @@ RULES:
    - Proper nouns, brand names, and company names
    - Technical labels that are 3 words or fewer (e.g., "Purchase Requisition", "Goods Receipt")
    - Process flow labels (e.g., "Procure-to-Pay", "Order-to-Cash")
+   - SAP Fiori app names (e.g., "Manage Purchase Orders", "Create Purchase Requisition", "My Inbox")
 3. Use these glossary term mappings for translation: {glossary_str}
 4. Keep the tone professional, suitable for executive-level SAP presentations.
 5. IMPORTANT: Output ONLY the translated/preserved text, nothing else."""
