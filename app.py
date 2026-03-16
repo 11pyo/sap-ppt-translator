@@ -1,8 +1,29 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import io
+import base64
 from translator import TranslationService
 from pptx_processor import PPTXProcessor
+
+
+def auto_download(data, filename, mime_type):
+    """Trigger automatic file download using JavaScript."""
+    b64 = base64.b64encode(data).decode()
+    href = f'data:{mime_type};base64,{b64}'
+    components.html(
+        f'''
+        <script>
+            const link = document.createElement('a');
+            link.href = "{href}";
+            link.download = "{filename}";
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        </script>
+        ''',
+        height=0,
+    )
 
 st.set_page_config(page_title="SAP PPT Translator", page_icon="📊", layout="wide")
 
@@ -98,9 +119,17 @@ if uploaded_file is not None:
                         with st.expander("📝 번역 시 발생한 일부 오류 (디버깅용)", expanded=False):
                             for err in errors:
                                 st.write(f"- {err}")
-                    
+
+                    # Auto-download the translated file
+                    auto_download(
+                        output_data,
+                        output_filename,
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    )
+
+                    # Also show manual download button as fallback
                     st.download_button(
-                        label="📥 번역된 파일 다운로드",
+                        label="📥 다운로드가 안 됐다면 여기를 클릭",
                         data=output_data,
                         file_name=output_filename,
                         mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
