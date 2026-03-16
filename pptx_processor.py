@@ -34,18 +34,23 @@ class PPTXProcessor:
                 pass
 
         # 2. Large font heuristic (diagram/chart display labels)
+        #    GUARD: Only apply to shapes with few paragraphs (≤3).
+        #    Content-rich text boxes (e.g., "Business Challenges" heading + 5 bullets)
+        #    should NOT be skipped just because their heading has a large font.
         if shape.has_text_frame:
-            if level == "minimal":
-                font_threshold = Pt(20)
-            elif level == "normal":
-                font_threshold = Pt(24)
-            else:  # thorough
-                font_threshold = Pt(32)
+            non_empty_for_font = [p for p in shape.text_frame.paragraphs if p.text.strip()]
+            if len(non_empty_for_font) <= 3:
+                if level == "minimal":
+                    font_threshold = Pt(20)
+                elif level == "normal":
+                    font_threshold = Pt(24)
+                else:  # thorough
+                    font_threshold = Pt(32)
 
-            for para in shape.text_frame.paragraphs:
-                for run in para.runs:
-                    if run.font.size and run.font.size >= font_threshold:
-                        return True
+                for para in shape.text_frame.paragraphs:
+                    for run in para.runs:
+                        if run.font.size and run.font.size >= font_threshold:
+                            return True
 
         # 3. Footer/watermark detection - shape near bottom of slide with short text
         if level in ("normal", "minimal") and shape.has_text_frame and self.slide_height:
