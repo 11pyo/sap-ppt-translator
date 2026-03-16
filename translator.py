@@ -48,7 +48,13 @@ class TranslationService:
         # Sort by length descending to match longer terms first
         # (e.g., "SAP Business Network" before "Business Network")
         for key in sorted(self._do_not_translate.values(), key=len, reverse=True):
-            pattern = re.compile(re.escape(key), re.IGNORECASE)
+            if len(key) <= 3:
+                # Short terms (CO, FI, AI, MM, etc.): CASE-SENSITIVE + word boundary
+                # Prevents "CO" from matching inside "Company", "recommend", etc.
+                pattern = re.compile(r'\b' + re.escape(key) + r'\b')
+            else:
+                # Longer terms (4+ chars): case-insensitive + word boundary
+                pattern = re.compile(r'\b' + re.escape(key) + r'\b', re.IGNORECASE)
             if pattern.search(result):
                 placeholder = f"__DNT{len(protected)}__"
                 result = pattern.sub(placeholder, result)
