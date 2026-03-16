@@ -33,14 +33,13 @@ with st.sidebar:
     st.divider()
     translation_level = st.radio(
         "번역 수준",
-        ["minimal", "normal", "thorough"],
-        index=1,
+        ["normal", "thorough"],
+        index=0,
         format_func=lambda x: {
-            "minimal": "🔹 최소 (제목/라벨/도형 유지, 본문만 번역)",
-            "normal": "🔸 표준 (권장 - 제목 유지, 본문 번역)",
+            "normal": "🔸 표준 (권장 - 제목/라벨/도형 유지, 본문 번역)",
             "thorough": "🔻 전체 (대부분 번역, 제목만 유지)"
         }[x],
-        help="SAP 프레젠테이션에는 '표준' 또는 '최소'를 권장합니다."
+        help="SAP 프레젠테이션에는 '표준'을 권장합니다."
     )
 
     st.info("💡 SAP 전문 용어(MRP, BDC 등)는 `glossary.json`의 정의를 따릅니다.")

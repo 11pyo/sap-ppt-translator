@@ -35,9 +35,32 @@ class TranslationService:
         # Exact match (case-insensitive)
         if stripped.lower() in self._do_not_translate:
             return True
-        # Check if text is entirely composed of do-not-translate terms
-        # (handles cases like "SAP Ariba" appearing as full paragraph text)
         return False
+
+    def _protect_glossary_terms(self, text):
+        """Replace do-not-translate terms with placeholders before translation.
+
+        This ensures terms like 'End-to-End' are preserved even when they
+        appear inside longer sentences (e.g., 'Provides end-to-end visibility').
+        """
+        protected = {}
+        result = text
+        # Sort by length descending to match longer terms first
+        # (e.g., "SAP Business Network" before "Business Network")
+        for key in sorted(self._do_not_translate.values(), key=len, reverse=True):
+            pattern = re.compile(re.escape(key), re.IGNORECASE)
+            if pattern.search(result):
+                placeholder = f"__DNT{len(protected)}__"
+                result = pattern.sub(placeholder, result)
+                protected[placeholder] = key
+        return result, protected
+
+    def _restore_glossary_terms(self, text, protected):
+        """Restore placeholders back to original terms after translation."""
+        result = text
+        for placeholder, original in protected.items():
+            result = result.replace(placeholder, original)
+        return result
 
     def translate(self, text):
         if not text or not text.strip():
@@ -67,23 +90,30 @@ class TranslationService:
             self.cache[text] = text
             return text
 
-        result = text
+        # Protect glossary terms with placeholders before translation
+        protected_text, protected_map = self._protect_glossary_terms(text)
+
+        result = protected_text
         if self.service_type == "DeepL":
-            result = self._translate_deepl(text)
+            result = self._translate_deepl(protected_text)
         elif self.service_type == "OpenAI":
-            result = self._translate_openai(text)
+            result = self._translate_openai(protected_text)
         elif self.service_type == "Free (Google)":
-            result = self._translate_free(text)
+            result = self._translate_free(protected_text)
         elif self.service_type == "Smart (OpenAI -> Free)":
             # Primary: OpenAI
-            result = self._translate_openai(text)
+            result = self._translate_openai(protected_text)
             # If OpenAI fails (returns original text or None/Error), try Free
-            if result is None or result == text:
-                result = self._translate_free(text)
+            if result is None or result == protected_text:
+                result = self._translate_free(protected_text)
 
         # FINAL GUARD: Ensure we NEVER return None
         if result is None:
             result = text
+
+        # Restore glossary terms from placeholders
+        if protected_map:
+            result = self._restore_glossary_terms(result, protected_map)
 
         self.cache[text] = result
         return result
@@ -148,9 +178,11 @@ RULES:
    - Technical labels that are 3 words or fewer (e.g., "Purchase Requisition", "Goods Receipt")
    - Process flow labels (e.g., "Procure-to-Pay", "Order-to-Cash")
    - SAP Fiori app names (e.g., "Manage Purchase Orders", "Create Purchase Requisition", "My Inbox")
-3. Use these glossary term mappings for translation: {glossary_str}
-4. Keep the tone professional, suitable for executive-level SAP presentations.
-5. IMPORTANT: Output ONLY the translated/preserved text, nothing else."""
+3. IMPORTANT: When these terms appear INSIDE a sentence, keep the term in English within the Korean translation.
+   Example: "Provides end-to-end visibility" → "End-to-End 가시성을 제공합니다"
+4. Use these glossary term mappings for translation: {glossary_str}
+5. Keep the tone professional, suitable for executive-level SAP presentations.
+6. IMPORTANT: Output ONLY the translated/preserved text, nothing else."""
 
             response = client.chat.completions.create(
                 model="gpt-4o",

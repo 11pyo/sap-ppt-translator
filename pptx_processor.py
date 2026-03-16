@@ -15,8 +15,8 @@ class PPTXProcessor:
         """Determine if a shape's text should be excluded from translation."""
         level = self.translation_level
 
-        # 1. Title/Subtitle placeholders - skip for normal and minimal
-        if level in ("normal", "minimal") and shape.is_placeholder:
+        # 1. Title/Subtitle placeholders - skip for normal
+        if level == "normal" and shape.is_placeholder:
             try:
                 idx = shape.placeholder_format.idx
                 # 0=title, 1=center title, 13=subtitle
@@ -35,14 +35,12 @@ class PPTXProcessor:
 
         # 2. Large font heuristic (diagram/chart display labels)
         #    GUARD: Only apply to shapes with few paragraphs (≤3).
-        #    Content-rich text boxes (e.g., "Business Challenges" heading + 5 bullets)
-        #    should NOT be skipped just because their heading has a large font.
+        #    Content-rich text boxes should NOT be skipped just because
+        #    their heading has a large font.
         if shape.has_text_frame:
             non_empty_for_font = [p for p in shape.text_frame.paragraphs if p.text.strip()]
             if len(non_empty_for_font) <= 3:
-                if level == "minimal":
-                    font_threshold = Pt(20)
-                elif level == "normal":
+                if level == "normal":
                     font_threshold = Pt(24)
                 else:  # thorough
                     font_threshold = Pt(32)
@@ -53,7 +51,7 @@ class PPTXProcessor:
                             return True
 
         # 3. Footer/watermark detection - shape near bottom of slide with short text
-        if level in ("normal", "minimal") and shape.has_text_frame and self.slide_height:
+        if level == "normal" and shape.has_text_frame and self.slide_height:
             try:
                 shape_top = shape.top
                 if shape_top is not None and self.slide_height > 0:
@@ -67,30 +65,28 @@ class PPTXProcessor:
 
         # 4. Label-only shape detection - short text, no sentence structure, few paragraphs
         #    Catches: diagram labels, process step names, small callout shapes
-        if level in ("normal", "minimal") and shape.has_text_frame:
+        #    Thresholds: ≤40 chars, ≤4 words — tight enough to avoid catching descriptions
+        if level == "normal" and shape.has_text_frame:
             tf = shape.text_frame
             non_empty_paras = [p for p in tf.paragraphs if p.text.strip()]
             total_text = tf.text.strip()
 
             if non_empty_paras and len(non_empty_paras) <= 3:
                 words = total_text.split()
-                has_sentence_punct = bool(re.search(r'[.!?。]', total_text))
+                # Comma also counts as sentence-like punctuation (indicates description)
+                has_sentence_punct = bool(re.search(r'[.!?。,]', total_text))
 
-                if level == "minimal":
-                    max_chars, max_words = 80, 10
-                else:  # normal
-                    max_chars, max_words = 60, 8
+                max_chars, max_words = 40, 4
 
                 if (len(total_text) <= max_chars
                         and len(words) <= max_words
                         and not has_sentence_punct):
                     return True
 
-        # 5. Short label detection (very short non-sentence text) - original rule
+        # 5. Short label detection (very short non-sentence text)
         if shape.has_text_frame:
             text = shape.text_frame.text.strip()
-            max_len = 8 if level == "minimal" else 5
-            if 1 < len(text) <= max_len and ' ' not in text:
+            if 1 < len(text) <= 5 and ' ' not in text:
                 return True
 
         return False
@@ -130,8 +126,7 @@ class PPTXProcessor:
         Pattern: first paragraph is short (e.g., "Business Challenges"),
         followed by multiple paragraphs of body/bullet content.
         """
-        level = self.translation_level
-        if level == "thorough":
+        if self.translation_level == "thorough":
             return False
 
         text = paragraph.text.strip()
